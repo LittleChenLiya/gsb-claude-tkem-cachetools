@@ -1,3 +1,14 @@
+Unreleased
+==========
+
+- Add ``LeaseCache`` and ``Lease``: an explicit lease layer on top of
+  the cache classes.  Reads return a lease pinning the current value
+  generation; expired or deleted items hand out no new leases, while
+  existing leases remain usable until released.  An optional cleanup
+  callback runs exactly once per generation, after the last lease on a
+  retired value is released, and always outside the internal lock.
+
+
 v7.2.0 (2026-09-16)
 ===================
 

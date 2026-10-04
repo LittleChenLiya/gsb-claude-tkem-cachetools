@@ -205,6 +205,73 @@ inserted into the cache.
       :returns: An iterable of expired `(key, value)` pairs.
 
 
+Lease layer
+===========
+
+.. module:: cachetools
+
+The :class:`LeaseCache` class wraps any of the cache implementations
+above with an explicit *lease* layer.  Reads through
+:meth:`LeaseCache.lease` (or :meth:`LeaseCache.get_lease`, which
+returns a ``(value, lease)`` pair) hand out a :class:`Lease` object
+pinning the current value.  A leased value remains usable until the
+lease is released, even if the underlying cache item expires or is
+deleted in the meantime.  Once an item has expired or been deleted, no
+new leases on it are handed out.  Values stored without leases are
+subject to the underlying cache's eviction rules as usual.
+
+.. doctest::
+
+   >>> from cachetools import LeaseCache, LRUCache
+   >>> cleaned = []
+   >>> cache = LeaseCache(LRUCache(maxsize=2), cleanup=lambda k, v: cleaned.append((k, v)))
+   >>> cache['a'] = 1
+   >>> lease = cache.lease('a')
+   >>> del cache['a']  # item removed, but the lease keeps the value alive
+   >>> cleaned
+   []
+   >>> lease.value
+   1
+   >>> lease.release()  # last lease released: cleanup runs
+   >>> cleaned
+   [('a', 1)]
+
+Generation lifecycle
+--------------------
+
+Each value stored under a key belongs to a *generation*.  Writing a
+key starts a new generation; deleting, overwriting, expiring, or
+evicting the item *retires* its generation.  A lease always refers to
+exactly one generation, so a stale lease can never clean up a newer
+value stored under the same key:
+
+1. **Alive**: the value is cached.  New leases may be acquired.
+   Releasing a lease has no further effect.
+2. **Retired**: the item has left the cache (delete, overwrite,
+   expiry, eviction, or :meth:`LeaseCache.clear`).  No new leases are
+   handed out; existing leases remain usable until released.
+3. **Cleaned up**: the generation is retired *and* its last lease has
+   been released.  The `cleanup` callback is invoked as
+   ``cleanup(key, value)`` exactly once per generation -- generations
+   that never had a lease are cleaned up as soon as they are retired.
+
+The cleanup callback always runs *outside* the internal lock, so it
+may safely re-access the same :class:`LeaseCache` (read, write, or
+acquire new leases) without deadlocking.  Releasing a lease more than
+once is a no-op.
+
+.. autoclass:: LeaseCache
+   :members:
+
+.. autoclass:: Lease
+   :members:
+
+The lease layer is covered by a dedicated test module, which can be
+run with::
+
+   python -m pytest tests/test_lease.py -v
+
+
 Extending cache classes
 =======================
 
