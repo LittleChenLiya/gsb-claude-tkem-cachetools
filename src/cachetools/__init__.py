@@ -5,6 +5,8 @@ __all__ = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "Lease",
+    "LeasedCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -22,6 +24,7 @@ import random
 import time
 
 from . import keys
+from ._leased import Lease, LeasedCache
 
 
 class _DefaultSize:

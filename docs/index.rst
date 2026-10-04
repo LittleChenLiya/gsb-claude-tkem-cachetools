@@ -205,6 +205,121 @@ inserted into the cache.
       :returns: An iterable of expired `(key, value)` pairs.
 
 
+Leased caches
+=============
+
+The :class:`LeasedCache` class wraps an existing cache instance and
+adds an explicit *lease* layer for cache entries.  A lease keeps the
+value of a cache entry alive even after the entry has been deleted
+from the cache or has expired, and defers resource cleanup until the
+last lease of an entry's *generation* is released.
+
+This is useful when cached values hold resources that must not be
+cleaned up while they are still in use, such as open files or network
+connections.
+
+.. autoclass:: LeasedCache(cache, cleanup=None)
+   :members: cache, lease
+
+   The `cache` argument specifies the underlying cache instance, e.g.
+   an :class:`LRUCache` or :class:`TTLCache`.  The optional `cleanup`
+   argument specifies a callable ``cleanup(key, value)`` that is
+   invoked when a generation's resource is cleaned up.
+
+   Reading a plain value via :meth:`~LeasedCache.__getitem__` follows
+   the underlying cache's eviction rules and does not acquire a lease.
+   To acquire a lease, call :meth:`~LeasedCache.lease`::
+
+      lease = cache.lease(key)
+      value = lease.value
+
+   A :class:`Lease` is a context manager, so it can also be used in a
+   ``with`` statement; :meth:`Lease.release` is called automatically
+   when the block exits.  For convenience, a lease is iterable and
+   unpacks to the ``(value, lease)`` pair.
+
+   .. autoclass:: Lease()
+      :members: cache, key, value, generation, released, release
+
+   **Generation lifecycle.**  Updating a cache entry via
+   :meth:`~LeasedCache.__setitem__` creates a new *generation*.
+   Leases acquired for an older generation never affect the new
+   generation: releasing an old lease only cleans up the old
+   generation's value, never the new one.  When a cache entry is
+   deleted, expires or is evicted, no new leases are granted, but
+   existing leases remain usable until they are released.  Resource
+   cleanup for a generation is invoked exactly once, when the entry
+   has been removed from the cache and the last lease of that
+   generation is released.
+
+   Cleanup callbacks are invoked *outside* the cache's internal lock,
+   so the callback may safely re-enter the cache, e.g. to read cached
+   values or acquire new leases, without risk of deadlock.
+
+   .. doctest::
+
+      >>> from cachetools import LRUCache, LeasedCache
+
+      >>> cleaned = []
+      >>> def cleanup(key, value):
+      ...     cleaned.append((key, value))
+
+      >>> cache = LeasedCache(LRUCache(maxsize=10), cleanup=cleanup)
+      >>> cache['key'] = 'v1'
+
+      >>> # acquire a lease on the current generation
+      >>> lease = cache.lease('key')
+      >>> lease.value
+      'v1'
+
+      >>> # delete the entry and write a new value: this starts a new
+      >>> # generation, but the old lease keeps 'v1' alive
+      >>> del cache['key']
+      >>> cache['key'] = 'v2'
+
+      >>> # releasing the old lease cleans up 'v1' only; 'v2' is
+      >>> # still readable
+      >>> _ = lease.release()
+      >>> cleaned
+      [('key', 'v1')]
+      >>> cache['key']
+      'v2'
+
+   Two leases on the same generation wait for the last release before
+   cleaning up:
+
+   .. doctest::
+
+      >>> cleaned = []
+      >>> def cleanup(key, value):
+      ...     cleaned.append((key, value))
+
+      >>> cache = LeasedCache(LRUCache(maxsize=10), cleanup=cleanup)
+      >>> cache['key'] = 'v1'
+      >>> lease1 = cache.lease('key')
+      >>> lease2 = cache.lease('key')
+      >>> del cache['key']
+      >>> _ = lease1.release()  # not cleaned up yet
+      >>> _ = lease2.release()  # now cleaned up
+      >>> cleaned
+      [('key', 'v1')]
+
+   Releasing a lease more than once is harmless; cleanup is invoked at
+   most once per generation:
+
+   .. doctest::
+
+      >>> lease1.release()
+      False
+      >>> cleaned
+      [('key', 'v1')]
+
+   The test suite for the lease layer can be run with `pytest`_ from
+   the source directory::
+
+      PYTHONPATH=src python -m pytest tests/test_leased.py
+
+
 Extending cache classes
 =======================
 
