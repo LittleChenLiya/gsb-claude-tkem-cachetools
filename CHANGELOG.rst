@@ -1,3 +1,15 @@
+v7.3.0 (UNRELEASED)
+===================
+
+- Add ``TTLCache.expire_scan()`` for batched, resumable expiration of
+  expired items.  Each call removes at most a given number of expired
+  items and returns an opaque cursor for continuing the scan.  The
+  scan's reference time is fixed when the scan starts, items inserted
+  or updated after that cannot be removed by the scan's cursors, and
+  optional expiration callbacks are invoked outside the scan's
+  internal lock.
+
+
 v7.2.0 (2026-09-16)
 ===================
 

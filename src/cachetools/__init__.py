@@ -19,6 +19,7 @@ import collections.abc
 import functools
 import heapq
 import random
+import threading
 import time
 
 from . import keys
@@ -452,14 +453,15 @@ class TTLCache(_TimedCache):
     """LRU Cache implementation with per-item time-to-live (TTL) value."""
 
     class _Link:
-        __slots__ = ("expires", "key", "next", "prev")
+        __slots__ = ("born", "expires", "key", "next", "prev")
 
-        def __init__(self, key=None, expires=None):
+        def __init__(self, key=None, expires=None, born=0):
             self.key = key
             self.expires = expires
+            self.born = born
 
         def __reduce__(self):
-            return TTLCache._Link, (self.key, self.expires)
+            return TTLCache._Link, (self.key, self.expires, self.born)
 
         def unlink(self):
             next = self.next
@@ -467,12 +469,49 @@ class TTLCache(_TimedCache):
             prev.next = next
             next.prev = prev
 
+    class _ExpireCursor:
+        """Opaque cursor marking the progress of a batched
+        :meth:`TTLCache.expire_scan` scan.
+
+        A cursor is bound to the identity of the cache that created it
+        and records the scan's fixed reference `time` as well as the
+        item generation horizon of the scan, so items inserted or
+        updated after the scan started cannot be removed by it.  Each
+        cursor may be passed to :meth:`TTLCache.expire_scan` at most
+        once; every batch returns a fresh cursor for the next batch,
+        or :const:`None` when the scan is complete.
+
+        """
+
+        __slots__ = ("_horizon", "_time", "_token", "_used")
+
+        def __init__(self, token, time, horizon):
+            self._token = token
+            self._time = time
+            self._horizon = horizon
+            self._used = False
+
+        @property
+        def time(self):
+            """The fixed reference time of the scan this cursor belongs to."""
+            return self._time
+
+        def __repr__(self):
+            return "%s(time=%r, consumed=%r)" % (
+                type(self).__name__,
+                self._time,
+                self._used,
+            )
+
     def __init__(self, maxsize, ttl, timer=time.monotonic, getsizeof=None):
         _TimedCache.__init__(self, maxsize, timer, getsizeof)
         self.__root = root = TTLCache._Link()
         root.prev = root.next = root
         self.__links = collections.OrderedDict()
         self.__ttl = ttl
+        self.__serial = 0
+        self.__scan_token = object()
+        self.__scan_lock = threading.Lock()
 
     def __contains__(self, key):
         try:
@@ -505,6 +544,8 @@ class TTLCache(_TimedCache):
         else:
             link.unlink()
         link.expires = time + self.__ttl
+        self.__serial += 1
+        link.born = self.__serial
         link.next = root = self.__root
         link.prev = prev = root.prev
         prev.next = root.prev = link
@@ -526,8 +567,15 @@ class TTLCache(_TimedCache):
                     yield curr.key
             curr = curr.next
 
+    def __getstate__(self):
+        # the scan lock is not picklable and is recreated in __setstate__
+        state = self.__dict__.copy()
+        del state["_TTLCache__scan_lock"]
+        return state
+
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self.__scan_lock = threading.Lock()
         root = self.__root
         root.prev = root.next = root
         for link in sorted(self.__links.values(), key=lambda obj: obj.expires):
@@ -562,6 +610,102 @@ class TTLCache(_TimedCache):
             curr.unlink()
             curr = next
         return expired
+
+    def expire_scan(self, count, cursor=None, time=None, callback=None):
+        """Remove up to `count` expired items from the cache and return an
+        `(expired, cursor)` pair.
+
+        `expired` is a list of the expired `(key, value)` pairs removed
+        by this batch, and `cursor` is an opaque
+        :class:`TTLCache._ExpireCursor` to be passed as the `cursor`
+        argument of the next call, or :const:`None` when the scan is
+        complete.  Unlike :meth:`expire`, which removes all expired
+        items in a single pass, this method processes at most `count`
+        items per call, so expiration of a large number of items can be
+        spread over multiple batches::
+
+            cursor = None
+            while True:
+                expired, cursor = cache.expire_scan(100, cursor)
+                for key, value in expired:
+                    print("expired:", key, value)
+                if cursor is None:
+                    break
+
+        The reference time of a scan is fixed when the scan is started,
+        i.e. when the first batch is requested without a `cursor`, and
+        defaults to the current value returned by :attr:`timer`.  The
+        `time` argument is only used when starting a new scan and is
+        ignored when resuming a scan with a `cursor`.
+
+        Items inserted or updated after a scan has been started belong
+        to a newer generation and will never be removed by that scan's
+        cursors, even if they would have expired by the scan's fixed
+        reference time.  Items removed from the cache by other means
+        while a scan is in progress are silently skipped.
+
+        A cursor is bound to the cache that created it; passing it to
+        another cache's :meth:`expire_scan` raises :exc:`ValueError`,
+        as does passing a cursor that has already been consumed by a
+        previous batch.  Each batch returns a fresh cursor for
+        continuing the scan.
+
+        If `callback` is not :const:`None`, it is called with each
+        expired `(key, value)` pair as `callback(key, value)` after the
+        batch has been removed.  Callbacks are invoked outside the
+        scan's internal lock, so they may safely re-enter the cache,
+        e.g. to read items or start another scan, without deadlocking.
+
+        """
+        if count < 1:
+            raise ValueError("count must be a positive integer")
+        with self.__scan_lock:
+            if cursor is None:
+                # start a new scan: fix the reference time and record
+                # the current item generation as this scan's horizon
+                if time is None:
+                    time = self.timer()
+                horizon = self.__serial
+            else:
+                if (
+                    not isinstance(cursor, TTLCache._ExpireCursor)
+                    or cursor._token is not self.__scan_token
+                ):
+                    raise ValueError("cursor belongs to a different cache")
+                if cursor._used:
+                    raise ValueError("cursor has already been consumed")
+                cursor._used = True
+                # resume a scan: reference time and horizon are fixed
+                time = cursor._time
+                horizon = cursor._horizon
+            root = self.__root
+            curr = root.next
+            links = self.__links
+            expired = []
+            cache_delitem = Cache.__delitem__
+            cache_getitem = Cache.__getitem__
+            while (
+                curr is not root
+                and len(expired) < count
+                and not (time < curr.expires)
+                and curr.born <= horizon
+            ):
+                expired.append((curr.key, cache_getitem(self, curr.key)))
+                cache_delitem(self, curr.key)
+                del links[curr.key]
+                next = curr.next
+                curr.unlink()
+                curr = next
+            if curr is root or time < curr.expires or curr.born > horizon:
+                cursor = None  # scan complete
+            else:
+                cursor = TTLCache._ExpireCursor(self.__scan_token, time, horizon)
+        # invoke callbacks outside the scan lock, so callbacks may
+        # safely re-enter the cache without deadlocking
+        if callback is not None:
+            for key, value in expired:
+                callback(key, value)
+        return expired, cursor
 
     def popitem(self):
         """Remove and return the `(key, value)` pair least recently used that

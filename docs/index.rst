@@ -151,6 +151,62 @@ inserted into the cache.
 
       :returns: An iterable of expired `(key, value)` pairs.
 
+   .. method:: expire_scan(self, count, cursor=None, time=None, callback=None)
+
+      Like :meth:`expire`, but removes at most `count` expired items
+      per call and returns an `(expired, cursor)` pair, where
+      `expired` is the list of `(key, value)` pairs removed by this
+      batch and `cursor` is an opaque cursor to be passed to the next
+      call, or :const:`None` when the scan is complete.  This allows
+      expiration of a large number of items to be spread over multiple
+      batches instead of a single pass over all expired items.
+
+      The reference time of a scan is fixed when the scan is started
+      and defaults to the current value returned by :attr:`timer`; the
+      `time` argument is only used when starting a new scan.  Items
+      inserted or updated after a scan has been started belong to a
+      newer generation and will not be removed by that scan's cursors,
+      while items deleted by other means are silently skipped.  A
+      cursor is bound to the cache that created it and may be consumed
+      only once; reusing a consumed cursor or passing it to a
+      different cache raises :exc:`ValueError`.
+
+      If `callback` is given, it is called as `callback(key, value)`
+      for each expired item after the batch has been removed, outside
+      the scan's internal lock, so callbacks may safely re-enter the
+      cache.
+
+      .. testcode::
+
+         class Clock:
+             def __init__(self):
+                 self.now = 0
+
+             def __call__(self):
+                 return self.now
+
+         clock = Clock()
+         cache = TTLCache(maxsize=10, ttl=60, timer=clock)
+         for i in range(5):
+             cache[i] = i
+         clock.now = 60  # all five items have expired now
+
+         cursor = None
+         while True:
+             expired, cursor = cache.expire_scan(2, cursor)
+             for key, value in expired:
+                 print("expired:", key, value)
+             if cursor is None:
+                 break
+
+      .. testoutput::
+
+         expired: 0 0
+         expired: 1 1
+         expired: 2 2
+         expired: 3 3
+         expired: 4 4
+
 .. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None)
    :members: popitem, timer, ttu
 
