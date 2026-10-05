@@ -5,6 +5,8 @@ __all__ = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "Partition",
+    "PartitionedCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -789,3 +791,6 @@ def cachedmethod(cache, key=keys.methodkey, lock=None, condition=None, info=Fals
             return _wrapper(method, cache, key, lock, condition)
 
     return decorator
+
+
+from .partitioned import Partition, PartitionedCache  # noqa: E402
