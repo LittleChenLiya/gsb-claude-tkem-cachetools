@@ -98,6 +98,24 @@ inserted into the cache.
    This class discards the least recently used items first to make
    space when necessary.
 
+.. autoclass:: PartitionedCache(partitions, partition, getsizeof=None, cache_factory=LRUCache)
+   :members: partition, partition_sizes, popitem, resize
+
+   This class maps each key to a partition using the `partition`
+   function, which is called exactly once per cache operation.  Each
+   partition is a cache of its own with an independent capacity and
+   eviction order, so a hot partition cannot evict items belonging to
+   other partitions.  The total `maxsize` and `currsize` are the sums
+   of the individual partitions.
+
+   .. code-block:: python
+
+      # two partitions, one for even and one for odd keys
+      cache = PartitionedCache({0: 2, 1: 2}, lambda key: key % 2)
+      cache[1] = cache[3] = cache[5] = "odd"  # evicts key 1 only
+      cache[2] = "even"
+      assert sorted(cache) == [2, 3, 5]  # odd partition unaffected
+
 .. autoclass:: RRCache(maxsize, choice=random.choice, getsizeof=None)
    :members: choice, popitem
 

@@ -1,3 +1,11 @@
+Unreleased
+==========
+
+- Add ``PartitionedCache``, a cache adapter that maps keys to
+  independent partitions with per-partition capacities and eviction
+  orders.
+
+
 v7.2.0 (2026-09-16)
 ===================
 

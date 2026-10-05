@@ -1,5 +1,12 @@
 import random
-from collections.abc import Callable, Iterator, MutableMapping, Sequence
+from collections.abc import (
+    Callable,
+    Hashable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import AbstractContextManager
 from typing import (
     Any,
@@ -20,6 +27,7 @@ __all__: Final = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "PartitionedCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -62,6 +70,25 @@ class Cache(MutableMapping[_KT, _VT]):
 class FIFOCache(Cache[_KT, _VT]): ...
 class LFUCache(Cache[_KT, _VT]): ...
 class LRUCache(Cache[_KT, _VT]): ...
+
+_PT = TypeVar("_PT", bound=Hashable)
+
+class PartitionedCache(Cache[_KT, _VT]):
+    def __init__(
+        self,
+        partitions: Mapping[_PT, float],
+        partition: Callable[[_KT], _PT],
+        getsizeof: Callable[[_VT], float] | None = None,
+        cache_factory: Callable[
+            [float, Callable[[_VT], float] | None], Cache[_KT, _VT]
+        ] = ...,
+    ) -> None: ...
+    @property
+    def partition(self) -> Callable[[_KT], _PT]: ...
+    @property
+    def partition_sizes(self) -> dict[_PT, float]: ...
+    def resize(self, partitions: Mapping[_PT, float]) -> None: ...
+    def popitem(self) -> tuple[_KT, _VT]: ...
 
 class RRCache(Cache[_KT, _VT]):
     def __init__(

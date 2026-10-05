@@ -5,6 +5,7 @@ __all__ = (
     "FIFOCache",
     "LFUCache",
     "LRUCache",
+    "PartitionedCache",
     "RRCache",
     "TLRUCache",
     "TTLCache",
@@ -368,6 +369,151 @@ class RRCache(Cache):
         Cache.clear(self)
         self.__index.clear()
         del self.__keys[:]
+
+
+class PartitionedCache(Cache):
+    """Cache that maps keys to independent partitions.
+
+    Each key is assigned to a partition by the `partition` function,
+    which is called exactly once per cache operation.  Each partition
+    is a cache of its own, with an independent maximum size and
+    eviction order, so a hot partition cannot evict items belonging to
+    other partitions.
+
+    The `partitions` argument maps partition ids to maximum sizes.
+    The optional `cache_factory` is called as `cache_factory(maxsize,
+    getsizeof)` to create each partition's cache, and defaults to
+    :class:`LRUCache`.  The optional `getsizeof` function is passed on
+    to the partition caches, so it determines the size of each item as
+    usual.  Items too large for their partition are rejected with a
+    `ValueError` before anything is evicted, leaving no partial state
+    behind.
+
+    Example with two partitions, one for even and one for odd keys:
+
+    .. code-block:: python
+
+        cache = PartitionedCache({0: 2, 1: 2}, lambda key: key % 2)
+        cache[1] = cache[3] = cache[5] = "odd"  # evicts key 1 only
+        cache[2] = "even"
+        assert sorted(cache) == [2, 3, 5]  # odd partition unaffected
+
+    """
+
+    __marker = object()
+
+    def __init__(self, partitions, partition, getsizeof=None, cache_factory=LRUCache):
+        if getsizeof:
+            self.getsizeof = getsizeof
+        self.__partition = partition
+        self.__getsizeof = getsizeof
+        self.__cache_factory = cache_factory
+        self.__caches = {}
+        self.resize(partitions)
+
+    def __repr__(self):
+        return "%s(%r, partition=%r, currsize=%r)" % (
+            type(self).__name__,
+            self.partition_sizes,
+            self.__partition,
+            self.currsize,
+        )
+
+    def __getitem__(self, key):
+        cache = self.__caches[self.__partition(key)]
+        try:
+            return cache[key]
+        except KeyError:
+            return self.__missing__(key)
+
+    def __setitem__(self, key, value):
+        self.__caches[self.__partition(key)][key] = value
+
+    def __delitem__(self, key):
+        del self.__caches[self.__partition(key)][key]
+
+    def __contains__(self, key):
+        try:
+            cache = self.__caches[self.__partition(key)]
+        except KeyError:
+            return False
+        return key in cache
+
+    def __iter__(self):
+        for cache in self.__caches.values():
+            yield from cache
+
+    def __len__(self):
+        return sum(len(cache) for cache in self.__caches.values())
+
+    def get(self, key, default=None):
+        return self.__caches[self.__partition(key)].get(key, default)
+
+    def pop(self, key, default=__marker):
+        cache = self.__caches[self.__partition(key)]
+        if default is self.__marker:
+            return cache.pop(key)
+        else:
+            return cache.pop(key, default)
+
+    def setdefault(self, key, default=None):
+        return self.__caches[self.__partition(key)].setdefault(key, default)
+
+    def clear(self):
+        for cache in self.__caches.values():
+            cache.clear()
+
+    @property
+    def partition(self):
+        """The function mapping keys to partition ids."""
+        return self.__partition
+
+    @property
+    def partition_sizes(self):
+        """A newly generated dict mapping partition ids to maxsizes."""
+        return {pid: cache.maxsize for pid, cache in self.__caches.items()}
+
+    @property
+    def maxsize(self):
+        """The total maximum size, i.e. the sum of all partitions."""
+        return sum(self.partition_sizes.values())
+
+    @property
+    def currsize(self):
+        """The total current size, i.e. the sum of all partitions."""
+        return sum(cache.currsize for cache in self.__caches.values())
+
+    def resize(self, partitions):
+        """Generate a new partition configuration.
+
+        Existing partitions keep their items and eviction order, but
+        items are evicted according to each partition's own rules if
+        its new capacity is exceeded.  Partitions missing from the
+        `partitions` mapping are dropped along with their items.
+        """
+        caches = {}
+        for pid, maxsize in dict(partitions).items():
+            if maxsize < 0:
+                raise ValueError("maxsize must be non-negative")
+            cache = self.__caches.get(pid)
+            if cache is None:
+                cache = self.__cache_factory(maxsize, self.__getsizeof)
+            else:
+                # update the partition cache's capacity in place, so
+                # its eviction order is preserved
+                cache._Cache__maxsize = maxsize
+                while cache.currsize > maxsize:
+                    cache.popitem()
+            caches[pid] = cache
+        self.__caches = caches
+
+    def popitem(self):
+        """Remove and return a `(key, value)` pair from the first
+        non-empty partition."""
+        for cache in self.__caches.values():
+            if len(cache):
+                return cache.popitem()
+        raise KeyError("%s is empty" % type(self).__name__)
 
 
 class _TimedCache(Cache):
