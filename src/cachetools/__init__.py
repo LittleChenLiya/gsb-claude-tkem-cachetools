@@ -19,6 +19,7 @@ import collections.abc
 import functools
 import heapq
 import random
+import threading
 import time
 
 from . import keys
@@ -448,18 +449,32 @@ class _TimedCache(Cache):
         raise NotImplementedError
 
 
+class _ExpireCursor:
+    """An opaque cursor for resumable batched expiration scans."""
+
+    __slots__ = ("cache", "consumed", "generation", "link", "time")
+
+    def __init__(self, cache, generation, time, link):
+        self.cache = cache
+        self.generation = generation
+        self.time = time
+        self.link = link
+        self.consumed = False
+
+
 class TTLCache(_TimedCache):
     """LRU Cache implementation with per-item time-to-live (TTL) value."""
 
     class _Link:
-        __slots__ = ("expires", "key", "next", "prev")
+        __slots__ = ("expires", "generation", "key", "next", "prev")
 
-        def __init__(self, key=None, expires=None):
+        def __init__(self, key=None, expires=None, generation=0):
             self.key = key
             self.expires = expires
+            self.generation = generation
 
         def __reduce__(self):
-            return TTLCache._Link, (self.key, self.expires)
+            return TTLCache._Link, (self.key, self.expires, self.generation)
 
         def unlink(self):
             next = self.next
@@ -473,6 +488,8 @@ class TTLCache(_TimedCache):
         root.prev = root.next = root
         self.__links = collections.OrderedDict()
         self.__ttl = ttl
+        self.__generation = 0
+        self.__lock = threading.Lock()
 
     def __contains__(self, key):
         try:
@@ -505,6 +522,8 @@ class TTLCache(_TimedCache):
         else:
             link.unlink()
         link.expires = time + self.__ttl
+        self.__generation += 1
+        link.generation = self.__generation
         link.next = root = self.__root
         link.prev = prev = root.prev
         prev.next = root.prev = link
@@ -526,8 +545,18 @@ class TTLCache(_TimedCache):
                     yield curr.key
             curr = curr.next
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # locks are not picklable; recreate on __setstate__
+        state.pop("_TTLCache__lock", None)
+        return state
+
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self.__lock = threading.Lock()
+        self.__generation = max(
+            (link.generation for link in self.__links.values()), default=0
+        )
         root = self.__root
         root.prev = root.next = root
         for link in sorted(self.__links.values(), key=lambda obj: obj.expires):
@@ -562,6 +591,68 @@ class TTLCache(_TimedCache):
             curr.unlink()
             curr = next
         return expired
+
+    def expire_batch(self, batchsize, cursor=None, time=None, callback=None):
+        """Remove expired items from the cache in batches.
+
+        Scan at most `batchsize` expired items, returning an iterable of
+        the expired `(key, value)` pairs and a cursor to continue the
+        scan, or `None` when the scan is complete.
+
+        The scan time is fixed when the scan starts, so items added or
+        updated during the scan are not removed by an old cursor.  Items
+        deleted during the scan are skipped.  The optional `callback` is
+        invoked with each expired `(key, value)` pair outside the cache's
+        internal lock, so it may safely reentrantly read the cache.
+
+        Reusing a consumed cursor is rejected, as is using a cursor that
+        belongs to a different cache.
+
+        """
+        if batchsize < 1:
+            raise ValueError("batchsize must be a positive integer")
+        with self.__lock:
+            if cursor is None:
+                if time is None:
+                    time = self.timer()
+                cursor = _ExpireCursor(self, self.__generation, time, self.__root.next)
+            else:
+                if cursor.cache is not self:
+                    raise ValueError("cursor belongs to a different cache")
+                if cursor.consumed:
+                    raise ValueError("cursor has already been consumed")
+        cursor.consumed = True
+        generation = cursor.generation
+        time = cursor.time
+        root = self.__root
+        links = self.__links
+        expired = []
+        cache_delitem = Cache.__delitem__
+        cache_getitem = Cache.__getitem__
+        curr = cursor.link
+        while curr is not root and len(expired) < batchsize:
+            link = curr
+            curr = curr.next
+            if links.get(link.key) is not link:
+                # link was deleted or replaced (updated) after scan start
+                continue
+            if link.generation > generation:
+                # item was added or updated after scan start
+                continue
+            if time < link.expires:
+                # not expired by the fixed scan time
+                continue
+            expired.append((link.key, cache_getitem(self, link.key)))
+            cache_delitem(self, link.key)
+            del links[link.key]
+            link.unlink()
+        next_cursor = (
+            None if curr is root else _ExpireCursor(self, generation, time, curr)
+        )
+        if callback is not None:
+            for key, value in expired:
+                callback(key, value)
+        return expired, next_cursor
 
     def popitem(self):
         """Remove and return the `(key, value)` pair least recently used that

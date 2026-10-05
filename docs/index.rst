@@ -151,6 +151,58 @@ inserted into the cache.
 
       :returns: An iterable of expired `(key, value)` pairs.
 
+   .. method:: expire_batch(self, batchsize, cursor=None, time=None, callback=None)
+
+      Remove expired items in batches, scanning at most `batchsize`
+      items per call and returning a resumable `cursor` to continue
+      the scan, or :const:`None` when the scan is complete.  This
+      avoids a single :meth:`expire` call scanning a large number of
+      items.
+
+      The scan time is fixed when the scan starts, so items added or
+      updated during the scan are not removed by an old cursor.  Items
+      deleted during the scan are skipped.  The optional `callback` is
+      invoked with each expired `(key, value)` pair outside the
+      cache's internal lock, so it may safely reentrantly read the
+      cache.  Reusing a consumed cursor is rejected, as is using a
+      cursor that belongs to a different cache.
+
+      :returns: A tuple ``(expired, cursor)``, where `expired` is a
+         list of expired `(key, value)` pairs and `cursor` is the next
+         cursor or :const:`None`.
+
+      .. testcode::
+
+         from cachetools import TTLCache
+
+         class VirtualClock:
+             def __init__(self):
+                 self.time = 0
+             def __call__(self):
+                 return self.time
+             def advance(self, seconds=1):
+                 self.time += seconds
+
+         clock = VirtualClock()
+         cache = TTLCache(maxsize=10, ttl=2, timer=clock)
+         for i in range(5):
+             cache[i] = i
+         clock.advance(2)
+
+         expired, cursor = cache.expire_batch(batchsize=2)
+         print(sorted(expired))
+         # continue the scan with the returned cursor
+         expired, cursor = cache.expire_batch(batchsize=2, cursor=cursor)
+         print(sorted(expired))
+         expired, cursor = cache.expire_batch(batchsize=2, cursor=cursor)
+         print(cursor)
+
+      .. testoutput::
+
+         [(0, 0), (1, 1)]
+         [(2, 2), (3, 3)]
+         None
+
 .. autoclass:: TLRUCache(maxsize, ttu, timer=time.monotonic, getsizeof=None)
    :members: popitem, timer, ttu
 

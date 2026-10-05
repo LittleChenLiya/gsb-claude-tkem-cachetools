@@ -91,6 +91,11 @@ class _TimedCache(Cache[_KT, _VT], Generic[_KT, _VT, _TT]):
     @property
     def timer(self) -> _Timer[_TT]: ...
 
+class _ExpireCursor:
+    """An opaque cursor for resumable batched expiration scans."""
+
+    __slots__ = ("cache", "consumed", "generation", "link", "time")
+
 class TTLCache(_TimedCache[_KT, _VT, _TT]):
     @overload
     def __init__(
@@ -111,6 +116,13 @@ class TTLCache(_TimedCache[_KT, _VT, _TT]):
     @property
     def ttl(self) -> Any: ...
     def expire(self, time: _TT | None = None) -> list[tuple[_KT, _VT]]: ...
+    def expire_batch(
+        self,
+        batchsize: int,
+        cursor: _ExpireCursor | None = None,
+        time: _TT | None = None,
+        callback: Callable[[_KT, _VT], Any] | None = None,
+    ) -> tuple[list[tuple[_KT, _VT]], _ExpireCursor | None]: ...
 
 class TLRUCache(_TimedCache[_KT, _VT, _TT]):
     @overload
